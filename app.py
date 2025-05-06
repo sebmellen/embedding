@@ -11,6 +11,7 @@ from sentence_transformers import SentenceTransformer
 import altair as alt
 import re
 import os
+import json
 
 # Configure threading for Numba to avoid the workqueue threading layer issue
 # Use a threading layer that doesn't require external dependencies
@@ -27,10 +28,6 @@ except ImportError:
     UMAP_AVAILABLE = False
     st.sidebar.warning("UMAP not installed. Consider installing it with: pip install umap-learn")
 
-# Set page title and layout
-st.set_page_config(page_title="Criminal Offense Embedding Visualization", layout="wide")
-st.title("Criminal Offense Embedding Visualization")
-
 # Try to import plotly, but handle it gracefully if there's an error
 try:
     import plotly.express as px
@@ -38,6 +35,10 @@ try:
 except (ImportError, AttributeError) as e:
     st.warning("Plotly not available or encountering an error. Will use Matplotlib for 3D visualization instead.")
     PLOTLY_AVAILABLE = False
+
+# Set page title and layout
+st.set_page_config(page_title="Criminal Offense Embedding Visualization", layout="wide")
+st.title("Criminal Offense Embedding Visualization")
 
 # Load the SentenceTransformer model
 @st.cache_resource
@@ -130,23 +131,47 @@ def create_matplotlib_3d_plot(df):
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
     
-    # Plot each group
-    for offense_type, color, label in [
-        ('non-reportable', 'blue', 'Non-reportable offense'),
-        ('felony', 'red', 'Felony offense'), 
-        ('custom_felony', 'orange', 'Custom felony offense')
-    ]:
-        mask = df['type'] == offense_type
-        if mask.any():
-            ax.scatter(
-                df.loc[mask, 'x'],
-                df.loc[mask, 'y'],
-                df.loc[mask, 'z'],
-                c=color,
-                label=label,
-                alpha=0.7,
-                s=30
-            )
+    # Check if 'category' column exists
+    if 'category' in df.columns:
+        # Get unique categories
+        categories = df['category'].unique()
+        
+        # Create a colormap
+        import matplotlib.colors as mcolors
+        colors = list(mcolors.TABLEAU_COLORS.values())
+        
+        # Plot each category
+        for i, category in enumerate(categories):
+            mask = df['category'] == category
+            if mask.any():
+                color = colors[i % len(colors)]
+                ax.scatter(
+                    df.loc[mask, 'x'],
+                    df.loc[mask, 'y'],
+                    df.loc[mask, 'z'],
+                    c=color,
+                    label=category,
+                    alpha=0.7,
+                    s=30
+                )
+    else:
+        # Fallback to original logic
+        for offense_type, color, label in [
+            ('non-reportable', 'blue', 'Non-reportable offense'),
+            ('felony', 'red', 'Felony offense'), 
+            ('custom_offense', 'orange', 'Custom felony offense')
+        ]:
+            mask = df['type'] == offense_type
+            if mask.any():
+                ax.scatter(
+                    df.loc[mask, 'x'],
+                    df.loc[mask, 'y'],
+                    df.loc[mask, 'z'],
+                    c=color,
+                    label=label,
+                    alpha=0.7,
+                    s=30
+                )
     
     ax.set_xlabel('Dimension 1')
     ax.set_ylabel('Dimension 2')
@@ -156,10 +181,27 @@ def create_matplotlib_3d_plot(df):
     
     return fig
 
+# Load felony clusters from JSON file
+@st.cache_data
+def load_felony_clusters():
+    try:
+        with open("embedding-diverse-criminal-records.json", "r") as file:
+            clusters = json.load(file)
+        return clusters
+    except Exception as e:
+        st.error(f"Error loading felony clusters: {e}")
+        return {}
+
 # Load exclusions data
 df_exclusions = load_exclusions_data()
 
-# Sample felony offenses for the demo
+# Load felony clusters
+felony_clusters = load_felony_clusters()
+
+# Create list of felony categories from clusters
+felony_categories = list(felony_clusters.keys()) if felony_clusters else []
+
+# Sample felony offenses for the demo (fallback if JSON not available)
 sample_felonies = [
     "Armed Robbery",
     "Aggravated Assault",
@@ -221,13 +263,32 @@ visualization_dim = st.sidebar.selectbox(
 st.sidebar.header("Enter Custom Offense")
 custom_felony = st.sidebar.text_input("Custom Offense (will be automatically classified)")
 
-# Select sample felonies
-st.sidebar.header("Sample Felonies")
-selected_felonies = st.sidebar.multiselect(
-    "Select sample felonies to include",
-    sample_felonies,
-    default=["Armed Robbery", "Murder", "Burglary"]
+# Select felony categories
+st.sidebar.header("Select Felony Categories")
+selected_categories = st.sidebar.multiselect(
+    "Select felony categories to include",
+    felony_categories if felony_categories else sample_felonies,
+    default=["Armed Robbery", "Murder", "Burglary"] if not felony_categories else felony_categories[:3]
 )
+
+# Option to select specific examples for each category
+show_examples = st.sidebar.checkbox("Select specific examples for each category", value=False)
+
+# Option to include/exclude non-reportable offenses
+include_nonreportable = st.sidebar.checkbox("Include non-reportable offenses", value=True)
+
+selected_examples = {}
+if show_examples and felony_clusters:
+    for category in selected_categories:
+        st.sidebar.subheader(f"{category} Examples")
+        if category in felony_clusters:
+            examples = felony_clusters[category]
+            selected = st.sidebar.multiselect(
+                f"Select examples for {category}",
+                examples,
+                default=examples[:2]  # Default to first 2 examples
+            )
+            selected_examples[category] = selected
 
 # Create a combined dataframe with both non-reportable offenses and felonies
 def prepare_data():
@@ -238,17 +299,47 @@ def prepare_data():
     # Add the selected felonies
     felonies = []
     
-    for felony in selected_felonies:
-        felonies.append({'offense': felony, 'type': 'felony'})
+    if felony_clusters and selected_categories:
+        # Use the detailed felony clusters from JSON
+        for category in selected_categories:
+            if show_examples and category in selected_examples:
+                # Add only selected examples for this category
+                for example in selected_examples[category]:
+                    felonies.append({
+                        'offense': example, 
+                        'type': 'felony', 
+                        'category': category
+                    })
+            else:
+                # Add all examples for this category
+                if category in felony_clusters:
+                    for example in felony_clusters[category]:
+                        felonies.append({
+                            'offense': example, 
+                            'type': 'felony', 
+                            'category': category
+                        })
+    else:
+        # Fallback to simple felony categories as before
+        for felony in selected_categories:
+            felonies.append({'offense': felony, 'type': 'felony', 'category': felony})
         
     # Add the custom felony if provided
     if custom_felony:
-        felonies.append({'offense': custom_felony, 'type': 'custom_offense'})
+        felonies.append({'offense': custom_felony, 'type': 'custom_offense', 'category': 'Custom'})
     
     df_felonies = pd.DataFrame(felonies)
     
-    # Combine both datasets
-    df_combined = pd.concat([df_non_reportable, df_felonies], ignore_index=True)
+    # Combine both datasets - conditionally include non-reportable offenses
+    if include_nonreportable:
+        df_combined = pd.concat([df_non_reportable, df_felonies], ignore_index=True)
+    else:
+        df_combined = df_felonies.copy()
+    
+    # Ensure 'category' column exists for all rows
+    if 'category' not in df_combined.columns:
+        df_combined['category'] = np.nan
+    df_combined['category'] = df_combined['category'].fillna(df_combined['type'])
     
     return df_combined
 
@@ -312,18 +403,12 @@ def visualize_data():
         if PLOTLY_AVAILABLE:
             try:
                 # Create 3D visualization with Plotly
-                color_mapping = {
-                    'non-reportable': 'Non-reportable offense',
-                    'felony': 'Felony offense',
-                    'custom_offense': 'Custom offense'
-                }
-                
-                df_combined['offense_type'] = df_combined['type'].map(color_mapping)
+                color_column = 'category' if 'category' in df_combined.columns else 'type'
                 
                 fig = px.scatter_3d(
                     df_combined, 
                     x='x', y='y', z='z',
-                    color='offense_type',
+                    color=color_column,
                     hover_name='offense',
                     title=f"3D {reduction_method} Visualization of Offenses",
                     opacity=0.7,
@@ -332,7 +417,7 @@ def visualize_data():
                 )
                 
                 fig.update_traces(marker=dict(size=5))
-                fig.update_layout(legend_title_text='Offense Type')
+                fig.update_layout(legend_title_text='Offense Category')
                 
                 st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
@@ -346,11 +431,50 @@ def visualize_data():
             st.pyplot(fig)
     else:
         # Create 2D visualization with Altair
+        # Use category for color if available, otherwise use type
+        color_column = 'category' if 'category' in df_combined.columns else 'type'
+        
+        # Get unique categories for color mapping
+        categories = df_combined[color_column].unique()
+        
+        # Create a color scale with different colors for each category
+        # Non-reportable stays blue, custom stays green, felony categories get different colors
+        domain = list(categories)
+        range_colors = ['#1f77b4']  # Start with blue for non-reportable
+        
+        # Add specific colors for felony categories
+        category_colors = {
+            'Armed Robbery': '#d62728',   # Red
+            'Murder': '#ff7f0e',          # Orange
+            'Burglary': '#9467bd',        # Purple
+            'Drug Trafficking': '#8c564b', # Brown
+            'Identity Theft': '#e377c2',   # Pink
+            'Kidnapping': '#7f7f7f',       # Gray
+            'Sexual Assault': '#bcbd22',   # Olive
+            'Grand Larceny': '#17becf',    # Cyan
+            'Fraud': '#2ca02c',           # Green
+            'Aggravated Assault': '#d62728', # Red
+            'custom_offense': '#2ca02c',   # Green for custom offense
+            'Custom': '#2ca02c',           # Green for custom
+            'non-reportable': '#1f77b4'    # Blue for non-reportable
+        }
+        
+        # Add colors for each category
+        for cat in domain:
+            if cat == 'non-reportable':
+                continue  # Already added blue
+            elif cat in category_colors:
+                range_colors.append(category_colors[cat])
+            else:
+                # For any other categories, assign a default color
+                range_colors.append('#d62728')  # Default to red for other felonies
+        
         chart = alt.Chart(df_combined).mark_circle(size=100).encode(
             x='x:Q',
             y='y:Q',
-            color=alt.Color('type:N', scale=alt.Scale(domain=list(colors.keys()), range=list(colors.values()))),
-            tooltip=['offense', 'type']
+            color=alt.Color(f'{color_column}:N', 
+                           scale=alt.Scale(domain=domain, range=range_colors)),
+            tooltip=['offense', color_column]
         ).properties(
             width=800,
             height=500
