@@ -12,6 +12,8 @@ import altair as alt
 import re
 import os
 import json
+import time
+import hashlib
 
 # Configure threading for Numba to avoid the workqueue threading layer issue
 # Use a threading layer that doesn't require external dependencies
@@ -35,6 +37,13 @@ try:
 except (ImportError, AttributeError) as e:
     st.warning("Plotly not available or encountering an error. Will use Matplotlib for 3D visualization instead.")
     PLOTLY_AVAILABLE = False
+
+# Try to import openai
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
 
 # Set page title and layout
 st.set_page_config(page_title="Criminal Offense Embedding Visualization", layout="wide")
@@ -68,6 +77,56 @@ def load_exclusions_data():
 def generate_embeddings(texts, _model):
     embeddings = _model.encode(texts)
     return embeddings
+
+# Generate embeddings using OpenAI
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def generate_openai_embeddings(texts, model_name="text-embedding-3-small"):
+    # Create a hash of the input to use for file caching
+    input_hash = hashlib.md5(str(texts).encode()).hexdigest()
+    cache_file = f"cache/openai_embeddings_{model_name}_{input_hash}.npy"
+    
+    # Create cache directory if it doesn't exist
+    os.makedirs("cache", exist_ok=True)
+    
+    # Check if cached embeddings exist
+    if os.path.exists(cache_file):
+        return np.load(cache_file)
+    
+    # Initialize empty embeddings array
+    embeddings = []
+    
+    # Process in batches to avoid rate limits (16 is max batch size for embeddings)
+    batch_size = 16
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i+batch_size]
+        
+        try:
+            # Call the OpenAI API
+            response = openai.embeddings.create(
+                model=model_name,
+                input=batch
+            )
+            
+            # Extract the embeddings from the response
+            batch_embeddings = [item.embedding for item in response.data]
+            embeddings.extend(batch_embeddings)
+            
+            # Sleep to avoid rate limits
+            if i + batch_size < len(texts):
+                time.sleep(0.5)
+                
+        except Exception as e:
+            st.error(f"Error generating OpenAI embeddings: {e}")
+            # Return empty embeddings in case of error
+            return np.zeros((len(texts), 1536))  # Default size for text-embedding-3-small
+    
+    # Convert to numpy array
+    embeddings_array = np.array(embeddings)
+    
+    # Save to cache
+    np.save(cache_file, embeddings_array)
+    
+    return embeddings_array
 
 # Augment text with context
 def augment_with_context(offense, offense_type):
@@ -218,15 +277,47 @@ sample_felonies = [
 # Add sidebar
 st.sidebar.header("Settings")
 
-# Add model selection
-model_name = st.sidebar.selectbox(
-    "Embedding Model",
-    ["all-MiniLM-L6-v2", "all-mpnet-base-v2", "all-distilroberta-v1"],
+# Add embedding provider selection
+embedding_provider = st.sidebar.selectbox(
+    "Embedding Provider",
+    ["SentenceTransformer", "OpenAI"] if OPENAI_AVAILABLE else ["SentenceTransformer"],
     index=0
 )
 
-# Load model based on selection
-model = load_model(model_name)
+if embedding_provider == "OpenAI":
+    if not OPENAI_AVAILABLE:
+        st.sidebar.error("OpenAI package not installed. Run: pip install openai")
+    else:
+        # Get API key from environment variable first
+        api_key_env = os.environ.get("OPENAI_API_KEY")
+        
+        if api_key_env:
+            openai.api_key = api_key_env
+            st.sidebar.success("Using OpenAI API key from environment variables")
+        else:
+            # If not in environment, ask for it in the UI
+            api_key = st.sidebar.text_input("OpenAI API Key", type="password")
+            if api_key:
+                openai.api_key = api_key
+            else:
+                st.sidebar.warning("No API key found in environment. Please enter your OpenAI API key or set OPENAI_API_KEY environment variable")
+        
+        # Select OpenAI model
+        openai_model = st.sidebar.selectbox(
+            "OpenAI Embedding Model",
+            ["text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"],
+            index=0
+        )
+else:
+    # Add model selection for SentenceTransformer
+    model_name = st.sidebar.selectbox(
+        "Embedding Model",
+        ["all-MiniLM-L6-v2", "all-mpnet-base-v2", "all-distilroberta-v1"],
+        index=0
+    )
+    
+    # Load model based on selection
+    model = load_model(model_name)
 
 # Add approach selection
 approach = st.sidebar.selectbox(
@@ -362,7 +453,15 @@ def visualize_data():
     
     # Generate embeddings
     with st.spinner("Generating embeddings..."):
-        embeddings = generate_embeddings(processed_offenses, model)
+        if embedding_provider == "OpenAI":
+            if not OPENAI_AVAILABLE or not openai.api_key:
+                st.error("OpenAI API key is required for OpenAI embeddings")
+                return
+            embeddings = generate_openai_embeddings(processed_offenses, openai_model)
+            embedding_info = f"OpenAI {openai_model}"
+        else:
+            embeddings = generate_embeddings(processed_offenses, model)
+            embedding_info = f"SentenceTransformer {model_name}"
     
     # Apply dimensionality reduction
     n_components = 3 if visualization_dim == "3D" else 2
@@ -390,7 +489,7 @@ def visualize_data():
     
     # Create visualization
     st.subheader(f"{visualization_dim} Visualization of Offenses using {reduction_method}")
-    st.write(f"Model: {model_name}, Approach: {approach}")
+    st.write(f"Model: {embedding_info}, Approach: {approach}")
     
     # Colors for different offense types
     colors = {
