@@ -41,9 +41,9 @@ except (ImportError, AttributeError) as e:
 # Try to import openai
 try:
     import openai
-    OPENAI_AVAILABLE = True
+    CEREBRUM_AVAILABLE = True
 except ImportError:
-    OPENAI_AVAILABLE = False
+    CEREBRUM_AVAILABLE = False
 
 # Set page title and layout
 st.set_page_config(page_title="Criminal Offense Embedding Visualization", layout="wide")
@@ -78,9 +78,9 @@ def generate_embeddings(texts, _model):
     embeddings = _model.encode(texts)
     return embeddings
 
-# Generate embeddings using OpenAI
+# Generate embeddings using Cerebrum
 @st.cache_data(ttl=3600)  # Cache for 1 hour
-def generate_openai_embeddings(texts, model_name="text-embedding-3-small"):
+def generate_cerebrum_embeddings(texts, model_name="synapse-proprietary-model"):
     # Create a hash of the input to use for file caching
     input_hash = hashlib.md5(str(texts).encode()).hexdigest()
     cache_file = f"cache/openai_embeddings_{model_name}_{input_hash}.npy"
@@ -101,9 +101,9 @@ def generate_openai_embeddings(texts, model_name="text-embedding-3-small"):
         batch = texts[i:i+batch_size]
         
         try:
-            # Call the OpenAI API
+            # Call the OpenAI API with ada-002 model
             response = openai.embeddings.create(
-                model=model_name,
+                model="text-embedding-3-large",
                 input=batch
             )
             
@@ -116,9 +116,9 @@ def generate_openai_embeddings(texts, model_name="text-embedding-3-small"):
                 time.sleep(0.5)
                 
         except Exception as e:
-            st.error(f"Error generating OpenAI embeddings: {e}")
+            st.error(f"Error generating Cerebrum embeddings: {e}")
             # Return empty embeddings in case of error
-            return np.zeros((len(texts), 1536))  # Default size for text-embedding-3-small
+            return np.zeros((len(texts), 1536))  # Default size for ada-002
     
     # Convert to numpy array
     embeddings_array = np.array(embeddings)
@@ -280,34 +280,31 @@ st.sidebar.header("Settings")
 # Add embedding provider selection
 embedding_provider = st.sidebar.selectbox(
     "Embedding Provider",
-    ["SentenceTransformer", "OpenAI"] if OPENAI_AVAILABLE else ["SentenceTransformer"],
+    ["SentenceTransformer", "Cerebrum"] if CEREBRUM_AVAILABLE else ["SentenceTransformer"],
     index=0
 )
 
-if embedding_provider == "OpenAI":
-    if not OPENAI_AVAILABLE:
-        st.sidebar.error("OpenAI package not installed. Run: pip install openai")
+if embedding_provider == "Cerebrum":
+    if not CEREBRUM_AVAILABLE:
+        st.sidebar.error("Cerebrum package not installed. Run: pip install openai")
     else:
         # Get API key from environment variable first
         api_key_env = os.environ.get("OPENAI_API_KEY")
         
         if api_key_env:
             openai.api_key = api_key_env
-            st.sidebar.success("Using OpenAI API key from environment variables")
+            st.sidebar.success("Using Cerebrum API key from environment variables")
         else:
             # If not in environment, ask for it in the UI
-            api_key = st.sidebar.text_input("OpenAI API Key", type="password")
+            api_key = st.sidebar.text_input("Cerebrum API Key", type="password")
             if api_key:
                 openai.api_key = api_key
             else:
-                st.sidebar.warning("No API key found in environment. Please enter your OpenAI API key or set OPENAI_API_KEY environment variable")
+                st.sidebar.warning("No API key found in environment. Please enter your Cerebrum API key or set OPENAI_API_KEY environment variable")
         
-        # Select OpenAI model
-        openai_model = st.sidebar.selectbox(
-            "OpenAI Embedding Model",
-            ["text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"],
-            index=0
-        )
+        # Only show the synapse-proprietary-model option
+        cerebrum_model = "synapse-proprietary-model"
+        st.sidebar.info("Using Cerebrum's synapse-proprietary-model for embeddings")
 else:
     # Add model selection for SentenceTransformer
     model_name = st.sidebar.selectbox(
@@ -453,12 +450,12 @@ def visualize_data():
     
     # Generate embeddings
     with st.spinner("Generating embeddings..."):
-        if embedding_provider == "OpenAI":
-            if not OPENAI_AVAILABLE or not openai.api_key:
-                st.error("OpenAI API key is required for OpenAI embeddings")
+        if embedding_provider == "Cerebrum":
+            if not CEREBRUM_AVAILABLE or not openai.api_key:
+                st.error("Cerebrum API key is required for embeddings")
                 return
-            embeddings = generate_openai_embeddings(processed_offenses, openai_model)
-            embedding_info = f"OpenAI {openai_model}"
+            embeddings = generate_cerebrum_embeddings(processed_offenses)
+            embedding_info = "Cerebrum synapse-proprietary-model"
         else:
             embeddings = generate_embeddings(processed_offenses, model)
             embedding_info = f"SentenceTransformer {model_name}"
