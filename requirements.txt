@@ -10,3 +10,4 @@ plotly
 orjson
 umap-learn
 nltk
+openai
